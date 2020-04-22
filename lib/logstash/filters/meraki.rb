@@ -30,91 +30,103 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
     @memcached_server = MemcachedConfig::servers.first if @memcached_server.empty?
     @memcached = Dalli::Client.new(@memcached_server, {:expires_in => 0})
     @store = @memcached.get(LOCATION_STORE) || {}
-    @store_manager = StoreManager.new(@memcached)   
+    @store_manager = StoreManager.new(@memcached)  
+    @last_refresh_stores = nil
   end
 
   public
-  def filter(event)
-    toDruid = {}
-    toCache = {}
 
-    clientMac = event.get(CLIENT_MAC)
+  def refresh_stores
+     return nil unless @last_refresh_stores.nil? || ((Time.now - @last_refresh_stores) > (60 * 5))
+     @last_refresh_stores = Time.now
+     e = LogStash::Event.new
+     e.set("refresh_stores",true)
+     return e
+  end
+
+  def filter(event)
+    to_druid = {}
+    to_cache = {}
+
+    client_mac = event.get(CLIENT_MAC)
     enrichment = event.get("enrichment")
 
     namespace_id = event.get(NAMESPACE_UUID) ? event.get(NAMESPACE_UUID) : ""
 
     timestamp = event.get(TIMESTAMP)
 
-    if clientMac then
-      toDruid[CLIENT_MAC] =  clientMac
-      @dim_to_druid.each { |dimension| toDruid[dimension] = event.get(dimension) if event.get(dimension) }
+    if client_mac then
+      to_druid[CLIENT_MAC] =  client_mac
+      @dim_to_druid.each { |dimension| to_druid[dimension] = event.get(dimension) if event.get(dimension) }
       
-      toCache.merge!(enrichment) if enrichment
+      to_cache.merge!(enrichment) if enrichment
       
       rssi = event.get(CLIENT_RSSI_NUM).to_i
 
       if event.include?(SRC)
-        toCache[DOT11STATUS] = "ASSOCIATED"
+        to_cache[DOT11STATUS] = "ASSOCIATED"
       else
-        toCache[DOT11STATUS] = "PROBING"
+        to_cache[DOT11STATUS] = "PROBING"
       end
 
      if rssi
        if rssi == 0
-         rssiName = "unknown"
+         rssi_name = "unknown"
        elsif rssi <= (-85)
-         rssiName = "bad"
+         rssi_name = "bad"
        elsif rssi <= (-80)
-         rssiName = "low"
+         rssi_name = "low"
        elsif rssi <= (-70)
-         rssiName = "medium"
+         rssi_name = "medium"
        elsif rssi <= (-60)
-         rssiName = "good"
+         rssi_name = "good"
        else
-         # No seria "excellent"??  
-         rssiName = "excelent"
+         rssi_name = "excellent"
        end
-       toCache[CLIENT_RSSI] = rssiName
+       to_cache[CLIENT_RSSI] = rssi_name
 
        if rssi == 0
-         toCache[CLIENT_PROFILE] = "hard"
+         to_cache[CLIENT_PROFILE] = "hard"
        elsif rssi <= (-75)
-         toCache[CLIENT_PROFILE] = "soft"
+         to_cache[CLIENT_PROFILE] = "soft"
        elsif rssi <= (-65)
-         toCache[CLIENT_PROFILE] = "medium"
+         to_cache[CLIENT_PROFILE] = "medium"
        else
-         toCache[CLIENT_PROFILE] = "hard"
+         to_cache[CLIENT_PROFILE] = "hard"
        end
      end
      
-     @store[clientMac] = toCache
+     @store[client_mac] = to_cache
      @memcached.set(LOCATION_STORE, @store)
-     toDruid.merge!(toCache)
+     to_druid.merge!(to_cache)
 
-     store_enrichment = @store_manager.enrich(toDruid)
-     store_enrichment.merge!(toDruid)
+     store_enrichment = @store_manager.enrich(to_druid)
+     store_enrichment.merge!(to_druid)
 
      namespace = store_enrichment[NAMESPACE_UUID]
      datasource = (namespace) ? DATASOURCE + "_" + namespace : DATASOURCE
 
-     counterStore = @memcached.get(COUNTER_STORE)
-     counterStore = Hash.new if counterStore.nil?
-     counterStore[datasource] = counterStore[datasource].nil? ? 0 : (counterStore[datasource] + 1)
-     @memcached.set(COUNTER_STORE,counterStore)
+     counter_store = @memcached.get(COUNTER_STORE)
+     counter_store = Hash.new if counter_store.nil?
+     counter_store[datasource] = counter_store[datasource].nil? ? 0 : (counter_store[datasource] + 1)
+     @memcached.set(COUNTER_STORE,counter_store)
 
 
-      flowsNumber = @memcached.get(FLOWS_NUMBER)
-      flowsNumber = Hash.new if flowsNumber.nil?
-      store_enrichment["flows_count"] = flowsNumber[datasource] if flowsNumber[datasource]  
+      flows_number = @memcached.get(FLOWS_NUMBER)
+      flows_number = Hash.new if flows_number.nil?
+      store_enrichment["flows_count"] = flows_number[datasource] if flows_number[datasource]  
       
-      enrichmentEvent = LogStash::Event.new
-      store_enrichment.each {|k,v| enrichmentEvent.set(k,v)}
+      enrichment_event = LogStash::Event.new
+      store_enrichment.each {|k,v| enrichment_event.set(k,v)}
 
-      yield enrichmentEvent
+      yield enrichment_event
 
     else
       @logger.warn("This event #{event} doesn't have client mac.")
     end #if else
+
+    event_refresh = refresh_stores
+    yield event_refresh if event_refresh
     event.cancel
   end   # def filter
 end     # class Logstash::Filter::Meraki
