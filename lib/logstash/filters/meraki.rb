@@ -103,8 +103,9 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
      store_enrichment = @store_manager.enrich(to_druid)
      store_enrichment.merge!(to_druid)
 
+     datasource = DATASOURCE
      namespace = store_enrichment[NAMESPACE_UUID]
-     datasource = (namespace) ? DATASOURCE + "_" + namespace : DATASOURCE
+     datasource = (namespace) ? DATASOURCE + "_" + namespace : DATASOURCE if (namespace && !namespace.empty?)
 
      counter_store = @memcached.get(COUNTER_STORE)
      counter_store = Hash.new if counter_store.nil?
