@@ -11,8 +11,6 @@ require_relative "util/location_constant"
 require_relative "util/memcached_config"
 require_relative "store/store_manager"
 
-
-
 class LogStash::Filters::Meraki < LogStash::Filters::Base
   include LocationConstant
 
@@ -27,7 +25,7 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
   def register
     @dim_to_druid = [CLIENT_LATLNG, WIRELESS_STATION, CLIENT_MAC_VENDOR, CLIENT_RSSI_NUM, CLIENT_OS ]  
     
-    @memcached_server = MemcachedConfig::servers.first if @memcached_server.empty?
+    @memcached_server = MemcachedConfig::servers if @memcached_server.empty?
     @memcached = Dalli::Client.new(@memcached_server, {:expires_in => 0})
     @store = @memcached.get(LOCATION_STORE) || {}
     @store_manager = StoreManager.new(@memcached)  
