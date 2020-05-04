@@ -23,7 +23,7 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
   
   public
   def register
-    @dim_to_druid = [CLIENT_LATLNG, WIRELESS_STATION, CLIENT_MAC_VENDOR, CLIENT_RSSI_NUM, CLIENT_OS ]  
+    @dim_to_cache = [CLIENT_LATLNG, WIRELESS_STATION, CLIENT_MAC_VENDOR, CLIENT_RSSI_NUM, CLIENT_OS ]  
     
     @memcached_server = MemcachedConfig::servers if @memcached_server.empty?
     @memcached = Dalli::Client.new(@memcached_server, {:expires_in => 0})
@@ -34,72 +34,77 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
   public
 
   def filter(event)
+    message = event.to_hash
+
     to_druid = {}
     to_cache = {}
 
-    client_mac = event.get(CLIENT_MAC)
-    enrichment = event.get("enrichment")
-
-    namespace_id = event.get(NAMESPACE_UUID) ? event.get(NAMESPACE_UUID) : ""
-
-    timestamp = event.get(TIMESTAMP)
+    client_mac = message[CLIENT_MAC]
 
     if client_mac then
-      to_druid[CLIENT_MAC] =  client_mac
-      @dim_to_druid.each { |dimension| to_druid[dimension] = event.get(dimension) if event.get(dimension) }
-      
-      to_cache.merge!(enrichment) if enrichment
-      
-      rssi = event.get(CLIENT_RSSI_NUM).to_i
+      namespace_id = message[NAMESPACE_UUID] ? message[NAMESPACE_UUID] : ""
+      @store = @memcached.get(LOCATION_STORE) || {}
+      enrichment = @store[client_mac + namespace_id]
+      timestamp = message[TIMESTAMP]
 
-      if event.include?(SRC)
+      to_cache = {} 
+      to_cache.merge!(enrichment) if enrichment
+      @dim_to_cache.each { |dimension| to_cache[dimension] = message[dimension] if message[dimension] }
+      to_druid = {}
+
+      rssi = message[CLIENT_RSSI_NUM].to_i
+      to_cache.merge!(message)
+
+      if message[SRC]
         to_cache[DOT11STATUS] = "ASSOCIATED"
       else
         to_cache[DOT11STATUS] = "PROBING"
       end
 
-     if rssi
-       if rssi == 0
-         rssi_name = "unknown"
-       elsif rssi <= (-85)
-         rssi_name = "bad"
-       elsif rssi <= (-80)
-         rssi_name = "low"
-       elsif rssi <= (-70)
-         rssi_name = "medium"
-       elsif rssi <= (-60)
-         rssi_name = "good"
-       else
-         rssi_name = "excellent"
-       end
-       to_cache[CLIENT_RSSI] = rssi_name
-
-       if rssi == 0
-         to_cache[CLIENT_PROFILE] = "hard"
-       elsif rssi <= (-75)
-         to_cache[CLIENT_PROFILE] = "soft"
-       elsif rssi <= (-65)
-         to_cache[CLIENT_PROFILE] = "medium"
-       else
-         to_cache[CLIENT_PROFILE] = "hard"
-       end
-     end
+      if rssi
+        if rssi == 0
+          rssi_name = "unknown"
+        elsif rssi <= (-85)
+          rssi_name = "bad"
+        elsif rssi <= (-80)
+          rssi_name = "low"
+        elsif rssi <= (-70)
+          rssi_name = "medium"
+        elsif rssi <= (-60)
+          rssi_name = "good"
+        else
+          rssi_name = "excellent"
+        end
+        to_cache[CLIENT_RSSI] = rssi_name
+ 
+        if rssi == 0
+          to_cache[CLIENT_PROFILE] = "hard"
+        elsif rssi <= (-75)
+          to_cache[CLIENT_PROFILE] = "soft"
+        elsif rssi <= (-65)
+          to_cache[CLIENT_PROFILE] = "medium"
+        else
+          to_cache[CLIENT_PROFILE] = "hard"
+        end
+      end
      
-     @store[client_mac] = to_cache
-     @memcached.set(LOCATION_STORE, @store)
-     to_druid.merge!(to_cache)
+      #@store[client_mac] = to_cache
+      @store[client_mac + namespace_id] = to_cache
+      @memcached.set(LOCATION_STORE, @store)
 
-     store_enrichment = @store_manager.enrich(to_druid)
-     store_enrichment.merge!(to_druid)
+      to_druid.merge!(to_cache)
 
-     datasource = DATASOURCE
-     namespace = store_enrichment[NAMESPACE_UUID]
-     datasource = (namespace) ? DATASOURCE + "_" + namespace : DATASOURCE if (namespace && !namespace.empty?)
+      store_enrichment = @store_manager.enrich(to_druid)
+      store_enrichment.merge!(to_druid)
 
-     counter_store = @memcached.get(COUNTER_STORE)
-     counter_store = Hash.new if counter_store.nil?
-     counter_store[datasource] = counter_store[datasource].nil? ? 0 : (counter_store[datasource] + 1)
-     @memcached.set(COUNTER_STORE,counter_store)
+      datasource = DATASOURCE
+      namespace = store_enrichment[NAMESPACE_UUID]
+      datasource = (namespace) ? DATASOURCE + "_" + namespace : DATASOURCE if (namespace && !namespace.empty?)
+
+      counter_store = @memcached.get(COUNTER_STORE)
+      counter_store = Hash.new if counter_store.nil?
+      counter_store[datasource] = counter_store[datasource].nil? ? 0 : (counter_store[datasource] + 1)
+      @memcached.set(COUNTER_STORE,counter_store)
 
 
       flows_number = @memcached.get(FLOWS_NUMBER)
