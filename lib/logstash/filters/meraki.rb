@@ -17,6 +17,9 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
   config_name "meraki"
 
   config :memcached_server, :validate => :string, :default => "", :required => false
+  config :counter_store_counter, :validate => :boolean, :default => false,   :required => false
+  config :flow_counter,          :validate => :boolean, :default => false,   :required => false
+  config :update_stores_rate,    :validate => :number,  :default => 60,      :required => false
 
   #Custom constants
   DATASOURCE =  "rb_location"
@@ -28,7 +31,7 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
     @memcached_server = MemcachedConfig::servers if @memcached_server.empty?
     @memcached = Dalli::Client.new(@memcached_server, {:expires_in => 0})
     @store = @memcached.get(LOCATION_STORE) || {}
-    @store_manager = StoreManager.new(@memcached)  
+    @store_manager = StoreManager.new(@memcached, @update_stores_rate)  
   end
 
   public
@@ -42,13 +45,11 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
     client_mac = message[CLIENT_MAC]
 
     if client_mac then
-      namespace_id = message[NAMESPACE_UUID] ? message[NAMESPACE_UUID] : ""
       @store = @memcached.get(LOCATION_STORE) || {}
-      enrichment = @store[client_mac + namespace_id]
+      namespace_id = message[NAMESPACE_UUID] ? message[NAMESPACE_UUID] : ""
       timestamp = message[TIMESTAMP]
 
       to_cache = {} 
-      to_cache.merge!(enrichment) if enrichment
       @dim_to_cache.each { |dimension| to_cache[dimension] = message[dimension] if message[dimension] }
       to_druid = {}
 
@@ -97,20 +98,22 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
       store_enrichment = @store_manager.enrich(to_druid)
       store_enrichment.merge!(to_druid)
 
-      datasource = DATASOURCE
-      namespace = store_enrichment[NAMESPACE_UUID]
-      datasource = (namespace) ? DATASOURCE + "_" + namespace : DATASOURCE if (namespace && !namespace.empty?)
-
-      counter_store = @memcached.get(COUNTER_STORE)
-      counter_store = Hash.new if counter_store.nil?
-      counter_store[datasource] = counter_store[datasource].nil? ? 0 : (counter_store[datasource] + 1)
-      @memcached.set(COUNTER_STORE,counter_store)
-
-
-      flows_number = @memcached.get(FLOWS_NUMBER)
-      flows_number = Hash.new if flows_number.nil?
-      store_enrichment["flows_count"] = flows_number[datasource] if flows_number[datasource]  
-      
+      if @counter_store_counter or @flow_counter
+         datasource = store_enrichment[NAMESPACE_UUID] ? DATASOURCE + "_" + store_enrichment[NAMESPACE_UUID] :       DATASOURCE
+ 
+         if @counter_store_counter
+          counter_store = @memcached.get(COUNTER_STORE) || {}
+          counter = counter_store[datasource] || 0
+          counter_store[datasource] = counter + splitted_msg.size
+          @memcached.set(COUNTER_STORE,counter_store)
+         end
+ 
+         if @flow_counter
+          flows_number = @memcached.get(FLOWS_NUMBER) || {}
+          store_enrichment["flows_count"] = (flows_number[datasource] || 0)
+         end
+      end
+ 
       enrichment_event = LogStash::Event.new
       store_enrichment.each {|k,v| enrichment_event.set(k,v)}
 
