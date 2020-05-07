@@ -38,6 +38,8 @@ class LogStash::Filters::Meraki < LogStash::Filters::Base
 
   def filter(event)
     message = event.to_hash
+    message.delete("@timestamp")
+    message.delete("@version")
 
     to_druid = {}
     to_cache = {}
